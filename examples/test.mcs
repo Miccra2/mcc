@@ -1,0 +1,6 @@
+@entry
+i32 main() {
+    putchar(48);
+    putchar(49);
+    return 0;
+}
