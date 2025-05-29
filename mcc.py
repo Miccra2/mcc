@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
+from typing import Any, Callable, override
 from copy import deepcopy
-from typing import Any
-import os, sys
+import sys, subprocess
+
+DEBUG: bool = True
 
 IOTA_COUNTER: int = 0
-def iota(idx: int | None = None) -> int:
+def iota(index: int | None = None) -> int:
     global IOTA_COUNTER
-    if isinstance(idx, int):
-        IOTA_COUNTER = idx
+    if isinstance(index, int):
+        IOTA_COUNTER = index
     result: int = IOTA_COUNTER
     IOTA_COUNTER += 1
     return result
@@ -16,244 +18,382 @@ def iota(idx: int | None = None) -> int:
 def default(cls: Any) -> Any:
     return field(default_factory=cls)
 
+def get_kind(cls: Any, kind: Any) -> str:
+    d: dict[str, int] = asdict(cls())
+    return [k for k in d if kind==d[k]][0]
+
+def cmd(*args) -> str:
+    return subprocess.run(*args, capture_output=True).stdout
+
 @dataclass
 class TokenKind:
-    UNDEFINED:  int = iota(256)
-    EOF:        int = iota()
-    IDENTIFIER: int = iota()
-    NUMBER:     int = iota()
+    undefined:   int = iota(0)
+    eof:         int = iota()
+    identifier:  int = iota()
+    function:    int = iota()
+    _return:     int = iota()
+    integer:     int = iota()
+    string:      int = iota()
+    at:          int = iota()
+    dotdotdot:   int = iota()
+    comma:       int = iota()
+    colon:       int = iota()
+    semi_colon:  int = iota()
+    open_paren:  int = iota()
+    close_paren: int = iota()
+    open_brace:  int = iota()
+    close_brace: int = iota()
+    count:       int = iota()
 
 @dataclass
 class Token:
-    kind:  int = TokenKind.UNDEFINED
-    begin: int = 0
-    end:   int = 0
+    kind:   int = TokenKind.undefined
+    begin:  int = 0
+    end:    int = 0
+    line:   int = 1
+    offset: int = 0
 
 @dataclass
-class Line:
-    line_number: int         = 1
-    line_offset: int         = 0
-    tokens:      list[Token] = default(list)
+class Directives:
+    undefined: int = iota(0)
+    extern:    int = iota()
+    entry:     int = iota()
+    count:     int = iota()
 
 @dataclass
-class OS:
-    UNDEFINED: int = iota(0)
-    LINUX: int = iota()
-    WINDOWS: int = iota()
+class Type:
+    undefined: int = iota(0)
+    u8:        int = iota()
+    u16:       int = iota()
+    u32:       int = iota()
+    u64:       int = iota()
+    usize:     int = iota()
+    i8:        int = iota()
+    i16:       int = iota()
+    i32:       int = iota()
+    i64:       int = iota()
+    pointer:   int = iota()
+    array:     int = iota()
+    string:    int = iota()
+    count:     int = iota()
 
 @dataclass
-class Entry:
-    name:    str = "main"
-    os:      int = OS.LINUX
-    machine: str = "x86_64"
+class ExprKind:
+    undefined: int = iota(0)
+    block:     int = iota()
+    count:     int = iota()
 
 @dataclass
-class Types:
-    UNDEFINED: int = iota(0)
-    VOID: int = iota()
-    I8: int = iota()
-    I16: int = iota()
-    I32: int = iota()
-    I64: int = iota()
-    U8: int = iota()
-    U16: int = iota()
-    U32: int = iota()
-    U64: int = iota()
+class Expression:
+    kind: int        = ExprKind.undefined
+    expr: Any | None = None
 
 @dataclass
-class Value:
-    _type: int        = Types.I64
+class BlockExpr:
+    exprs: list[Expression] = default([])
+
+@dataclass
+class ArgumentExpr:
+    _type: int        = Type.undefined
     value: Any | None = None
 
 @dataclass
-class Parameter:
-    name:  str   = "a"
-    value: Value = default(Value)
+class FuncDefExpr:
+    args: list[ArgumentExpr] = default([])
+    body: BlockExpr          = default(BlockExpr)
 
 @dataclass
-class Block:
-    statements:  list[Statement]  = default(list)
-    expressions: list[Expression] = default(list)
+class StmtKind:
+    undefined: int = iota(0)
+    _return:   int = iota()
+    count:     int = iota()
 
 @dataclass
-class Func:
-    name:        str             = "main"
-    params:      list[Parameter] = default(list)
-    return_type: int             = Types.VOID
-    block:       Block           = default(Block)
+class ExprStmt:
+    kind: int        = StmtKind.undefined
+    stmt: Any | None = None
+
+@dataclass
+class ReturnStmt:
+    _type: int = Type.undefined
+    expr:  Expression = default(Expression)
 
 @dataclass
 class Program:
-    entries: list[Entry] = default(list)
-    funcs:   list[FuncDef]  = default(list)
+    externs:   list[FuncDefExpr] = default(list)
+    functions: list[FuncDefExpr] = default(list)
+    entry:     list[FuncDefExpr] = default(list)
 
-class Lexer:
+class Logger:
+    def print(self, msg: str, end: str = '\n') -> None:
+        sys.stderr.write(msg + end)
+
+    def error(self, msg: str, sep: str = " ", _exit: bool = True) -> None:
+        self.print(f"ERROR:{sep}{msg}")
+        if _exit:
+            sys.exit(1)
+
+    def warning(self, msg: str, sep: str = " ") -> None:
+        self.print(f"WARNING:{sep}{msg}")
+
+    def info(self, msg: str, sep: str = " ") -> None:
+        self.print(f"INFO:{sep}{msg}")
+
+    def panic(self, msg: str) -> None:
+        if DEBUG:
+            self.print(f"PANIC:{sys._getframe().f_back.f_lineno}:{sys.argv[0]}: {msg}")
+            sys.exit(1)
+
+    def todo(self, msg: str) -> None:
+        if DEBUG:
+            self.print(f"TODO:{sys._getframe().f_back.f_lineno}:{sys.argv[0]}: {msg}")
+            sys.exit(1)
+
+    def unimplemented(self, msg: str) -> None:
+        if DEBUG:
+            self.print(f"UNIMPLEMENTED:{sys._getframe().f_back.f_lineno}:{sys.argv[0]}: {msg}")
+            sys.exit(1)
+
+log: Logger = Logger()
+
+class Lexer(Logger):
     def __init__(self, path: str) -> None:
-        self.path:        str = path
-        self.text:        str = ""
-        self.index:       int = 0
-        self.line_offset: int = 0
-        self.lines:       int = 1
+        self.path:      str        = path
+        self.text:      str        = ""
+        self.cursor:    int        = -2     # set to -2 so after populating curr_char and next_char it points at 0
+        self.offset:    int        = 0
+        self.line:      int        = 1
+        self.curr_char: str | None = None
+        self.next_char: str | None = None
 
         try:
-            with open(self.path, "rb") as file:
-                self.text = file.read().decode()
+            with open(self.path, "r") as file:
+                self.text = file.read()
         except FileNotFoundError:
-            assert False, f"ERROR:Lexer({self.path}): Could not open file, please provide a valid file path!"
+            self.error(f"While lexing could not open file `{self.path}`, please provide a valid file path!", False)
 
-    def range(self, idx: int) -> bool:
-        return idx < len(self.text)
+        # populate curr_char and next_char
+        self.advance(2)
 
-    def has(self, s: str) -> bool:
-        return all([self.range(self.index+i) and s[i]==self.text[self.index+i] for i in range(len(s))])
+    def error(self, msg: str, pos: bool = True) -> None:
+        if pos:
+            log.error("{self.line}:{self.cursor-self.offset+1}:{self.path}:Lexer: {msg}", sep="")
+        else:
+            log.error("Lexer: {msg}", sep="")
 
-    def white(self, idx: str) -> bool:
-        c: str = self.text[idx]
-        return c==' ' or c=='\n' or c=='\r' or c=='\t'
-
-    def linecomment(self, idx: int) -> bool:
-        c: str = self.text[idx]
-        d: str = self.text[idx+1]
-        return c=='/' and d=='/'
-    
-    def blockcommentbegin(self, idx: int) -> bool:
-        c: str = self.text[idx]
-        d: str = self.text[idx+1]
-        return c=='/' and d=='*'
-    
-    def blockcommentend(self, idx: int) -> bool:
-        c: str = self.text[idx]
-        d: str = self.text[idx+1]
-        return c=='*' and d=='/'
-
-    def digit(self, idx: int) -> bool:
-        c: int = ord(self.text[idx])
-        return c>=ord('0') and c<=ord('9')
-
-    def identifier(self, idx: int) -> bool:
-        c: int = ord(self.text[idx])
-        return self.digit(idx) or c==ord('_') or (c>=ord('A') and c<=ord('Z')) or (c>=ord('a') and c<=ord('z'))
-
-    def tokenise(self) -> Token:
-        # skip whitespaces and comments
-        run: bool = True
-        while run and self.range(self.index):
-            if self.white(self.index):
-                # whitespaces: ` `, `\n`, `\r` and `\t`
-                if self.text[self.index] == '\n':
-                    self.lines += 1
-                    self.line_offset = self.index + 1
-                self.index += 1
-            elif self.linecomment(self.index):
-                # linecomment: `//`
-                while self.range(self.index+1) and self.text[self.index] != '\n':
-                    self.index += 1
-            elif self.blockcommentbegin(self.index):
-                # blockcomment: `/*` and `*/`
-                # skip start of block comment `/*` to not get `/*/` as a valid block comment
-                self.index += 2
-                while self.range(self.index+1) and not self.blockcommentend(self.index):
-                    if self.text[self.index] == '\n':
-                        self.lines += 1
-                        self.line_offset = self.index + 1
-                    self.index += 1
-                # skip end of block comment to not get `*/` as tokens!
-                self.index += 2
+    def advance(self, offset: int) -> None:
+        for i in range(offset):
+            self.curr_char = self.next_char
+            if self.cursor+2 < len(self.text):
+                self.next_char = self.text[self.cursor+2]
             else:
-                # no whitespace and comment found (break out of loop)
-                run = False
+                self.next_char = None
+            self.cursor += 1
+
+    def range(self, index: int) -> bool:
+        return index < len(self.text)
+
+    def get_str(self, begin: int, end: int) -> str | None:
+        if self.range(begin) and self.range(end):
+            return self.text[begin:end]
+        return None
+
+    def digit(self, char: str | None = None) -> bool:
+        if isinstance(char, str):
+            return ord(char)>=ord('0') and ord(char)<=ord('9')
+        return ord(self.curr_char)>=ord('0') and ord(self.curr_char)<=ord('9')
+
+    def upper_case(self, char: str | None = None) -> bool:
+        if isinstance(char, str):
+            return ord(char)>=ord('A') and ord(char)<=ord('Z')
+        return ord(self.curr_char)>=ord('A') and ord(self.curr_char)<=ord('Z')
+
+    def lower_case(self, char: str | None = None) -> bool:
+        if isinstance(char, str):
+            return ord(char)>=ord('a') and ord(char)<=ord('z')
+        return ord(self.curr_char)>=ord('a') and ord(self.curr_char)<=ord('z')
+    
+    def alpha(self, char: str | None = None) -> bool:
+        return self.upper_case(char) or self.lower_case(char)
+    
+    def identifier_begin(self, char: str | None = None) -> bool:
+        if isinstance(char, str):
+            return char=='_' or self.alpha(char)
+        return self.curr_char=='_' or self.alpha(char)
+
+    def identifier_end(self, char: str | None = None) -> bool:
+        return self.identifier_begin(char) or self.digit(char)
+
+    def get_token(self) -> Token:
+        # skip whitespaces and comments (` `, `\n`, `\r`, `\t`, `//`, `/*` and `*/`)
+        while self.range(self.cursor):
+            match (self.curr_char, self.next_char):
+                case (' ' | '\n' | '\r' | '\t', _):
+                    if self.curr_char == '\n':
+                        self.line += 1
+                        self.offset = self.cursor+1
+                    self.advance(1)
+                case ('/', '/'):
+                    while self.range(self.cursor) and self.curr_char != '\n':
+                        self.advance(1)
+                case ('/', '*'):
+                    self.advance(2)
+                    while self.range(self.cursor+1) and self.curr_char != '*' and self.next_char != '/':
+                        if self.get_char(self.cursor) == '\n':
+                            self.line += 1
+                            self.offset = self.cursor+1
+                        self.advance(1)
+                    self.advance(2)
+                case _:
+                    break
 
         # return early if end of file is reached
-        if not self.range(self.index):
-            return Token(TokenKind.EOF, self.index, self.index)
+        if not self.range(self.cursor):
+            return Token(TokenKind.eof, deepcopy(self.cursor), deepcopy(self.cursor), deepcopy(self.line), deepcopy(self.offset))
         
-        begin: int = self.index
-        kind: int = TokenKind.UNDEFINED
-        if self.has('+'):
-            kind = ord('+')
-        elif self.has(';'):
-            kind = ord(';')
-        elif self.has('@'):
-            kind = ord('@')
-        elif self.has('('):
-            kind = ord('(')
-        elif self.has(')'):
-            kind = ord(')')
-        elif self.has('{'):
-            kind = ord('{')
-        elif self.has('}'):
-            kind = ord('}')
-        else:
-            while self.range(self.index) and self.digit(self.index):
-                self.index += 1
-            if begin != self.index:
-                return Token(TokenKind.NUMBER, begin, self.index)
-            
-            while self.range(self.index) and self.identifier(self.index):
-                self.index += 1
-            if begin != self.index:
-                return Token(TokenKind.IDENTIFIER, begin, self.index)
+        begin: int = deepcopy(self.cursor)
+        kind: int = TokenKind.undefined
+        match (self.curr_char, self.next_char):
+            case ('.', '.'):
+                if self.range(self.cursor+1) and self.text[self.cursor+1] == '.':
+                    self.advance(2)
+                    kind = TokenKind.dotdotdot
+            case (',', _): kind = TokenKind.comma
+            case (':', _): kind = TokenKind.colon
+            case (';', _): kind = TokenKind.semi_colon
+            case ('@', _): kind = TokenKind.at
+            case ('(', _): kind = TokenKind.open_paren
+            case (')', _): kind = TokenKind.close_paren
+            case ('{', _): kind = TokenKind.open_brace
+            case ('}', _): kind = TokenKind.close_brace
+            case _:
+                if self.digit():
+                    while self.range(self.cursor) and self.digit():
+                        self.advance(1)
+                    kind = TokenKind.integer
+                elif self.identifier_begin():
+                    while self.range(self.cursor+1) and self.identifier_end(self.text[self.cursor+1]):
+                        self.advance(1)
+                    kind = TokenKind.identifier
+                    match self.text[begin:self.cursor+1]:
+                        case "fn":
+                            kind = TokenKind.function
+                        case "return":
+                            kind = TokenKind._return
+                elif self.curr_char == '"':
+                    self.advance(1)
+                    while self.range(self.cursor) and self.curr_char != '"':
+                        if self.curr_char == '\\':
+                            self.advance(1)
+                        self.advance(1)
+                    kind = TokenKind.string
+                else:
+                    self.error("Encountered an invalid character (curr=0x%.2X, next=0x%.2X)!" % (ord(self.curr_char), ord(self.next_char)))
 
-            c: int = ord(self.text[self.index])
-            assert False, ("ERROR:Lexer(%i:%i:%s): Encountered an invalid token 0x%.4X" % (
-                    self.line, self.line_offset-self.index, self.path)
-                ) + f"{f' `{self.text[self.index]}`' if c>=0x20 and c<=0x7E else ''}!"
+        self.advance(1)
+        return Token(kind, begin, deepcopy(self.cursor), deepcopy(self.line), deepcopy(self.offset))
 
-        self.index += 1
-        return Token(kind, begin, self.index)
-    
-    def lex(self) -> list[Line]:
-        l: int = self.lines
-        lo: int = self.line_offset
+    def tokenise(self) -> list[Token]:
         tokens: list[Token] = []
-        token: Token = self.tokenise()
-        lines: list[Line] = []
-        
-        while token.kind != TokenKind.EOF:
-            if self.lines != l and len(tokens) >= 1:
-                lines.append(Line(l, lo, tokens))
-                tokens = []
-                l = self.lines
-                lo = self.line_offset
-            tokens.append(token)
-            token = self.tokenise()
-        
-        if len(tokens) >= 1:
-            lines.append(Line(l, lo, tokens))
+        token: Token = self.get_token()
 
-        return lines
+        while token.kind != TokenKind.eof:
+            tokens.append(token)
+            token = self.get_token()
+
+        return tokens
 
 class Parser:
     def __init__(self, lexer: Lexer) -> None:
-        self.lexer: Lexer = lexer
-        self.lines: list[Line] = self.lexer.lex()
+        self.lexer:   Lexer       = lexer
+        self.tokens:  list[Token] = lexer.tokenise()
+        self.program: Program     = Program()
+        self.index:   int         = 0
 
-    def expression(self) -> Expression:
-        ...
+    def error(self, msg: str, token: Token | None = None, begin: bool = True) -> None:
+        if begin and isinstance(token, Token):
+            log.error(f"{token.line}:{token.begin-token.offset+1}:{self.lexer.path}: {msg}", sep="")
+        elif not begin and isinstance(token, Token):
+            log.error(f"{token.line}:{token.end-token.offset+1}:{self.lexer.path}: {msg}", sep="")
 
-    def type_expr(self) -> TypeExpr:
-        ...
+    def get_str(self, token: Token) -> str:
+        return self.lexer.text[token.begin:token.end]
 
-    def value_expr(self) -> ValueExpr:
-        ...
+    def range(self, index: int) -> bool:
+        return index < len(self.tokens)
 
-    def block_stmt(self) -> Block:
-        ...
-
-    def func_expr(self) -> FuncDefExpr:
-        ...
+    def get_function(self) -> FuncDefExpr | None:
+        function: FuncDefExpr = FuncDefExpr()
+        if self.tokens[self.cursor] != TokenKind.function:
+            return None
+        self.cursor += 1
+        token: Token = self.tokens[self.cursor]
+        function.name = self.get_str()
+        return function
+    
+    def get_directive(self) -> None:
+        if not self.range(self.index+1):
+            token: Token = self.tokens[-1]
+            self.error("Expected directive but reached end of file!", token)
+        token: Token = self.tokens[self.index+1]
+        match token:
+            case TokenKind.indentifier:
+                if not self.lexer.range(token.end-1):
+                    self.error("Token has invalid range!", token)
+                match self.get_str(token):
+                    case "extern":
+                        self.cursor += 2
+                        function: FuncDefExpr | None = self.get_function()
+                        if isinstance(function, FuncDefExpr):
+                            self.program.extern.append(function)
+                    case "entry":
+                        self.cursor += 2
+                        function: FuncDefExpr | None = self.get_function()
+                        if isinstance(function, FuncDefExpr):
+                            self.program.entry.append(function)
+                    case _:
+                        self.error(f"Invalide identifier `{self.get_str(token)}`!", token)
+            case _:
+                self.error(f"Expected directive of type `identifier` but found directive of type `{get_kind(TokenKind, token.kind)}`", token)
 
     def parse(self) -> Program:
-        ...
+        while self.range(self.index):
+            token: Token = self.tokens[self.index]
+            match token.kind:
+                case TokenKind.at:
+                    self.get_directive()
+                case TokenKind.function:
+                    self.get_function()
+                case _:
+                    log.error(f"Expected a token of kind `fn` or an `@` directive, but token of kind `{get_kind(TokenKind, token.kind)}`!", token)
+        return self.program
+
+def usage() -> None:
+    log.print("USAGE: python mcc.py <run|com|lex|par> <input>")
+
+def lex_tokens(lexer: Lexer) -> None:
+    tokens: list[Token] = lexer.tokenise()
+    length: int = 0
+    for k in asdict(TokenKind()):
+        if len(k) > length:
+            length = len(k)
+    for token in tokens:
+        kind: str = get_kind(TokenKind, token.kind)
+        kind += " " * (length - len(kind))
+        text: str = lexer.text[token.begin:token.end]
+        pos:  str = f"{token.line}:{token.begin-token.offset+1}:{lexer.path}:"
+        log.print(f"Token:{pos} {kind} `{text}`!")
+
+def parse_tokens(parser: Parser) -> None:
+    program: Program = parser.parse()
 
 def main() -> None:
-    lexer: Lexer = Lexer("examples/test.mcs")
-    
-    lines: list[Line] = lexer.lex()
-    for l in lines:
-        for t in l.tokens:
-            s: str = lexer.text[t.begin:t.end]
-            print(f"{l.line_number}:{t.begin-l.line_offset}-{t.end-l.line_offset}:{t}{f' `{s}`'if len(s)==1 and ord(s)>=0x20 and ord(s)<=0x7E else f' `{s}`' if t.kind in (TokenKind.NUMBER, TokenKind.IDENTIFIER) else ''}!")
+    path: str = "hello.mcs"
+    lexer: Lexer = Lexer(path)
+    #lex_tokens(lexer)
 
+    parser: Parser = Parser(lexer)
+    parse_tokens(parser)
+    
 if __name__ == "__main__":
     main()

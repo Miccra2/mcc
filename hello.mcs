@@ -1,0 +1,7 @@
+@extern fn printf(fmt: str, ...);
+
+@entry
+fn main() {
+    printf("Hello from MCC!\n");
+    return 0;
+}
